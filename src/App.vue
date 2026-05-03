@@ -13,10 +13,26 @@
     </header>
 
     <main class="main-content">
+      <div class="error-notification" v-if="errorMessage" @click="errorMessage = ''">
+        <div class="error-content">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"/>
+            <line x1="12" y1="8" x2="12" y2="12"/>
+            <line x1="12" y1="16" x2="12.01" y2="16"/>
+          </svg>
+          <span>{{ errorMessage }}</span>
+          <button class="error-close" @click.stop="errorMessage = ''">×</button>
+        </div>
+      </div>
+
       <section class="drive-selection-section" v-if="!isScanning && !scanComplete">
         <div class="card">
           <div class="card-header">
             <h2>选择要清理的磁盘</h2>
+            <button class="btn btn-outline btn-sm" @click="reloadDrives" :disabled="isLoadingDrives">
+              <span class="spinner" v-if="isLoadingDrives" style="width: 14px; height: 14px;"></span>
+              刷新
+            </button>
           </div>
           <div class="card-body">
             <div class="drive-grid" v-if="drives.length > 0">
@@ -44,11 +60,23 @@
             </div>
             
             <div class="empty-state" v-else>
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-                <circle cx="12" cy="12" r="10"/>
-                <path d="M8 15s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>
-              </svg>
-              <p>正在加载磁盘信息...</p>
+              <div v-if="isLoadingDrives">
+                <div class="spinner" style="width: 40px; height: 40px; margin: 0 auto 16px;"></div>
+                <p>正在加载磁盘信息...</p>
+                <p class="text-muted" style="font-size: 12px; margin-top: 8px;">
+                  如果加载时间过长，请点击刷新按钮
+                </p>
+              </div>
+              <div v-else>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                  <circle cx="12" cy="12" r="10"/>
+                  <path d="M8 15s1.5 2 4 2 4-2 4-2M9 9h.01M15 9h.01"/>
+                </svg>
+                <p>未检测到可用磁盘</p>
+                <button class="btn btn-primary btn-sm" style="margin-top: 16px;" @click="reloadDrives">
+                  重新检测
+                </button>
+              </div>
             </div>
 
             <div class="action-bar" v-if="selectedDrive">
@@ -339,8 +367,8 @@
             <div class="ai-result">
               <div class="result-item">
                 <span class="result-label">安全性评估</span>
-                <span class="badge" :class="aiAnalysisResult.safeToDelete ? 'badge-success' : 'badge-warning'">
-                  {{ aiAnalysisResult.safeToDelete ? '可以安全删除' : '需要谨慎' }}
+                <span class="badge" :class="aiAnalysisResult.safeToDelete === true ? 'badge-success' : (aiAnalysisResult.safeToDelete === false ? 'badge-danger' : 'badge-warning')">
+                  {{ aiAnalysisResult.safeToDelete === true ? '可以安全删除' : (aiAnalysisResult.safeToDelete === false ? '不建议删除' : '需要谨慎') }}
                 </span>
               </div>
               
@@ -394,15 +422,145 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 
-const { ipcRenderer } = window.require ? window.require('electron') : {
-  ipcRenderer: {
-    invoke: async () => ({ success: false, error: 'Not in Electron' }),
-    on: () => {}
+const IPC_TIMEOUT = 30000
+
+let ipcRenderer = null
+
+try {
+  if (window.require) {
+    ipcRenderer = window.require('electron').ipcRenderer
+    console.log('[Renderer] Electron ipcRenderer available')
+  } else {
+    console.log('[Renderer] window.require not available, running in non-Electron environment')
+  }
+} catch (error) {
+  console.log('[Renderer] Error accessing Electron:', error)
+}
+
+if (!ipcRenderer) {
+  ipcRenderer = {
+    invoke: async (channel, ...args) => {
+      console.log(`[Renderer] Mock IPC invoke: ${channel}`, args)
+      
+      if (channel === 'ping') {
+        return { success: true, timestamp: Date.now() }
+      }
+      
+      if (channel === 'get-drives') {
+        return {
+          success: true,
+          data: [
+            { letter: 'C:', name: '系统盘', type: 'Local Disk' },
+            { letter: 'D:', name: '数据盘', type: 'Local Disk' }
+          ]
+        }
+      }
+      
+      if (channel === 'scan-disk') {
+        await new Promise(resolve => setTimeout(resolve, 2000))
+        return {
+          success: true,
+          data: {
+            SYSTEM_TEMP: {
+              name: '系统临时文件',
+              description: 'Windows系统产生的临时文件',
+              safeToDelete: true,
+              defaultChecked: true,
+              files: [
+                { path: 'C:\\Temp\\temp1.tmp', name: 'temp1.tmp', size: 102400, modifiedTime: '2024-01-15', extension: '.tmp' },
+                { path: 'C:\\Temp\\temp2.tmp', name: 'temp2.tmp', size: 204800, modifiedTime: '2024-01-14', extension: '.tmp' }
+              ],
+              totalSize: 358400
+            },
+            BROWSER_CACHE: {
+              name: '浏览器缓存',
+              description: 'Chrome、Edge、Firefox等浏览器的缓存文件',
+              safeToDelete: true,
+              defaultChecked: true,
+              files: [
+                { path: 'C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\Cache\\cache1', name: 'cache1', size: 1048576, modifiedTime: '2024-01-15', extension: '' }
+              ],
+              totalSize: 1048576
+            },
+            LOG_FILES: {
+              name: '系统日志',
+              description: 'Windows系统和应用程序的日志文件',
+              safeToDelete: true,
+              defaultChecked: true,
+              files: [
+                { path: 'C:\\Windows\\Logs\\CBS\\CBS.log', name: 'CBS.log', size: 204800, modifiedTime: '2024-01-15', extension: '.log' }
+              ],
+              totalSize: 204800
+            }
+          }
+        }
+      }
+      
+      if (channel === 'search-file-safety') {
+        const [fileName, filePath] = args
+        const ext = fileName ? fileName.substring(fileName.lastIndexOf('.')) : ''
+        
+        await new Promise(resolve => setTimeout(resolve, 1000))
+        
+        if (['.tmp', '.temp', '.log', '.bak', '.old'].includes(ext.toLowerCase())) {
+          return {
+            success: true,
+            data: {
+              safeToDelete: true,
+              confidence: 95,
+              description: '这是一个临时文件或日志文件，由程序自动生成。',
+              impact: '删除该文件不会对系统或程序产生负面影响。',
+              sources: ['本地知识库']
+            }
+          }
+        }
+        
+        return {
+          success: true,
+          data: {
+            safeToDelete: null,
+            confidence: 50,
+            description: '无法确定该文件的具体用途。',
+            impact: '不确定删除该文件的影响。建议谨慎操作。',
+            warning: '无法确认该文件是否可以安全删除，请谨慎操作。',
+            sources: ['本地知识库']
+          }
+        }
+      }
+      
+      if (channel === 'delete-files') {
+        const [files] = args
+        await new Promise(resolve => setTimeout(resolve, 1500))
+        return {
+          success: true,
+          data: {
+            success: files,
+            failed: [],
+            totalDeleted: files.reduce((sum, f) => sum + (f.size || 0), 0)
+          }
+        }
+      }
+      
+      if (channel === 'show-confirm-dialog') {
+        return true
+      }
+      
+      return { success: false, error: 'Not in Electron' }
+    },
+    on: (channel, listener) => {
+      console.log(`[Renderer] Mock IPC on: ${channel}`)
+    },
+    removeListener: (channel, listener) => {
+      console.log(`[Renderer] Mock IPC removeListener: ${channel}`)
+    }
   }
 }
 
+console.log('[Renderer] ipcRenderer setup complete')
+
 const drives = ref([])
 const selectedDrive = ref(null)
+const isLoadingDrives = ref(false)
 const isScanning = ref(false)
 const scanProgress = ref(0)
 const currentScanningFile = ref('')
@@ -419,13 +577,18 @@ const isAnalyzingAI = ref(null)
 const aiAnalysisResult = ref(null)
 const aiAnalysisFile = ref(null)
 const showAIModal = ref(false)
+const errorMessage = ref('')
 
-const electronAvailable = computed(() => typeof ipcRenderer.invoke === 'function')
+const electronAvailable = computed(() => {
+  return ipcRenderer && typeof ipcRenderer.invoke === 'function'
+})
 
 const totalFiles = computed(() => {
   let count = 0
   Object.values(categorizedResults.value).forEach(cat => {
-    count += cat.files.length
+    if (cat.files) {
+      count += cat.files.length
+    }
   })
   return count
 })
@@ -433,19 +596,21 @@ const totalFiles = computed(() => {
 const totalSize = computed(() => {
   let size = 0
   Object.values(categorizedResults.value).forEach(cat => {
-    size += cat.totalSize
+    size += cat.totalSize || 0
   })
   return size
 })
 
 const displayedFiles = computed(() => {
   if (selectedCategory.value && categorizedResults.value[selectedCategory.value]) {
-    return categorizedResults.value[selectedCategory.value].files
+    return categorizedResults.value[selectedCategory.value].files || []
   }
   
   let files = []
   Object.values(categorizedResults.value).forEach(cat => {
-    files = files.concat(cat.files)
+    if (cat.files) {
+      files = files.concat(cat.files)
+    }
   })
   return files
 })
@@ -461,7 +626,7 @@ const selectedSize = computed(() => {
   let size = 0
   displayedFiles.value.forEach(file => {
     if (selectedFiles.value.has(file.path)) {
-      size += file.size
+      size += file.size || 0
     }
   })
   return size
@@ -480,7 +645,7 @@ const getConfidenceClass = (confidence) => {
 }
 
 const formatSize = (bytes) => {
-  if (bytes === 0) return '0 B'
+  if (!bytes || bytes === 0) return '0 B'
   const k = 1024
   const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
@@ -493,32 +658,96 @@ const formatDate = (dateStr) => {
   return date.toLocaleDateString('zh-CN')
 }
 
+const showError = (message) => {
+  console.error('[Renderer] Error:', message)
+  errorMessage.value = message
+  setTimeout(() => {
+    if (errorMessage.value === message) {
+      errorMessage.value = ''
+    }
+  }, 5000)
+}
+
+const invokeWithTimeout = async (channel, ...args) => {
+  console.log(`[Renderer] Invoking IPC: ${channel}`, args)
+  
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      console.log(`[Renderer] IPC timeout: ${channel}`)
+      reject(new Error(`操作超时 (${IPC_TIMEOUT / 1000}秒)`))
+    }, IPC_TIMEOUT)
+    
+    ipcRenderer.invoke(channel, ...args)
+      .then(result => {
+        clearTimeout(timeout)
+        console.log(`[Renderer] IPC result: ${channel}`, result)
+        resolve(result)
+      })
+      .catch(error => {
+        clearTimeout(timeout)
+        console.error(`[Renderer] IPC error: ${channel}`, error)
+        reject(error)
+      })
+  })
+}
+
 const loadDrives = async () => {
-  if (!electronAvailable.value) {
+  console.log('[Renderer] loadDrives called')
+  console.log('[Renderer] electronAvailable:', electronAvailable.value)
+  
+  isLoadingDrives.value = true
+  errorMessage.value = ''
+  
+  try {
+    console.log('[Renderer] Calling ipcRenderer.invoke("get-drives")...')
+    const result = await invokeWithTimeout('get-drives')
+    console.log('[Renderer] get-drives result:', result)
+    
+    if (result.success && result.data && result.data.length > 0) {
+      drives.value = result.data
+      console.log('[Renderer] Drives loaded:', drives.value)
+    } else {
+      console.log('[Renderer] No drives returned, using fallback')
+      drives.value = [
+        { letter: 'C:', name: '系统盘', type: 'Local Disk' },
+        { letter: 'D:', name: '数据盘', type: 'Local Disk' }
+      ]
+    }
+  } catch (error) {
+    console.error('[Renderer] Failed to load drives:', error)
+    showError('加载磁盘信息失败: ' + error.message)
+    
+    console.log('[Renderer] Using fallback drives')
     drives.value = [
       { letter: 'C:', name: '系统盘', type: 'Local Disk' },
       { letter: 'D:', name: '数据盘', type: 'Local Disk' }
     ]
-    return
-  }
-  
-  const result = await ipcRenderer.invoke('get-drives')
-  if (result.success) {
-    drives.value = result.data
+  } finally {
+    isLoadingDrives.value = false
   }
 }
 
+const reloadDrives = async () => {
+  console.log('[Renderer] reloadDrives called')
+  drives.value = []
+  await loadDrives()
+}
+
 const selectDrive = (drive) => {
+  console.log('[Renderer] selectDrive:', drive)
   selectedDrive.value = selectedDrive.value === drive.letter ? null : drive.letter
 }
 
 const startScan = async () => {
   if (!selectedDrive.value) return
   
+  console.log('[Renderer] startScan for drive:', selectedDrive.value)
+  
   isScanning.value = true
   scanProgress.value = 0
   currentScanningFile.value = ''
   scanComplete.value = false
+  errorMessage.value = ''
   
   const progressInterval = setInterval(() => {
     if (scanProgress.value < 90) {
@@ -527,13 +756,9 @@ const startScan = async () => {
   }, 500)
   
   try {
-    let result
-    
-    if (electronAvailable.value) {
-      result = await ipcRenderer.invoke('scan-disk', selectedDrive.value)
-    } else {
-      result = await mockScan()
-    }
+    console.log('[Renderer] Calling scan-disk IPC...')
+    const result = await invokeWithTimeout('scan-disk', selectedDrive.value)
+    console.log('[Renderer] scan-disk result:', result)
     
     clearInterval(progressInterval)
     scanProgress.value = 100
@@ -542,75 +767,27 @@ const startScan = async () => {
       categorizedResults.value = result.data
       
       Object.entries(result.data).forEach(([key, category]) => {
-        category.files.forEach(file => {
-          if (category.defaultChecked && category.safeToDelete) {
-            selectedFiles.value.add(file.path)
-          }
-          file.needsConfirmation = !category.defaultChecked || !category.safeToDelete
-        })
+        if (category.files) {
+          category.files.forEach(file => {
+            if (category.defaultChecked && category.safeToDelete) {
+              selectedFiles.value.add(file.path)
+            }
+            file.needsConfirmation = !category.defaultChecked || !category.safeToDelete
+          })
+        }
       })
       
       scanComplete.value = true
+      console.log('[Renderer] Scan complete, categories:', Object.keys(result.data))
+    } else {
+      showError('扫描失败: ' + (result.error || '未知错误'))
     }
   } catch (error) {
     clearInterval(progressInterval)
-    console.error('Scan error:', error)
+    console.error('[Renderer] Scan error:', error)
+    showError('扫描过程中出错: ' + error.message)
   } finally {
     isScanning.value = false
-  }
-}
-
-const mockScan = async () => {
-  await new Promise(resolve => setTimeout(resolve, 2000))
-  
-  return {
-    success: true,
-    data: {
-      SYSTEM_TEMP: {
-        name: '系统临时文件',
-        description: 'Windows系统产生的临时文件，删除后不会影响系统运行',
-        safeToDelete: true,
-        defaultChecked: true,
-        files: [
-          { path: 'C:\\Temp\\temp1.tmp', name: 'temp1.tmp', size: 102400, modifiedTime: '2024-01-15', extension: '.tmp' },
-          { path: 'C:\\Temp\\temp2.tmp', name: 'temp2.tmp', size: 204800, modifiedTime: '2024-01-14', extension: '.tmp' },
-          { path: 'C:\\Windows\\Temp\\install.log', name: 'install.log', size: 51200, modifiedTime: '2024-01-10', extension: '.log' }
-        ],
-        totalSize: 358400
-      },
-      BROWSER_CACHE: {
-        name: '浏览器缓存',
-        description: 'Chrome、Edge、Firefox等浏览器的缓存文件',
-        safeToDelete: true,
-        defaultChecked: true,
-        files: [
-          { path: 'C:\\Users\\User\\AppData\\Local\\Google\\Chrome\\Cache\\cache1', name: 'cache1', size: 1048576, modifiedTime: '2024-01-15', extension: '' },
-          { path: 'C:\\Users\\User\\AppData\\Local\\Microsoft\\Edge\\Cache\\cache2', name: 'cache2', size: 524288, modifiedTime: '2024-01-15', extension: '' }
-        ],
-        totalSize: 1572864
-      },
-      RECYCLE_BIN: {
-        name: '回收站',
-        description: '回收站中的文件',
-        safeToDelete: true,
-        defaultChecked: false,
-        warning: '删除后文件将永久丢失',
-        files: [
-          { path: 'C:\\$Recycle.Bin\\file1.txt', name: 'file1.txt', size: 10240, modifiedTime: '2024-01-01', extension: '.txt' }
-        ],
-        totalSize: 10240
-      },
-      LOG_FILES: {
-        name: '系统日志',
-        description: 'Windows系统和应用程序的日志文件',
-        safeToDelete: true,
-        defaultChecked: true,
-        files: [
-          { path: 'C:\\Windows\\Logs\\CBS\\CBS.log', name: 'CBS.log', size: 204800, modifiedTime: '2024-01-15', extension: '.log' }
-        ],
-        totalSize: 204800
-      }
-    }
   }
 }
 
@@ -653,6 +830,7 @@ const backToSelection = () => {
   selectedFiles.value.clear()
   scanProgress.value = 0
   deleteProgress.value = 0
+  errorMessage.value = ''
 }
 
 const confirmDelete = async () => {
@@ -661,7 +839,7 @@ const confirmDelete = async () => {
   let hasHighRisk = false
   Object.entries(categorizedResults.value).forEach(([key, category]) => {
     if (category.warning || !category.defaultChecked) {
-      category.files.forEach(file => {
+      category.files?.forEach(file => {
         if (selectedFiles.value.has(file.path)) {
           hasHighRisk = true
         }
@@ -670,10 +848,14 @@ const confirmDelete = async () => {
   })
   
   if (hasHighRisk && electronAvailable.value) {
-    const confirmed = await ipcRenderer.invoke('show-confirm-dialog', 
-      `您选择了 ${selectedCount.value} 个文件，其中包含需要确认的项目。\n\n继续删除吗？`
-    )
-    if (!confirmed) return
+    try {
+      const confirmed = await invokeWithTimeout('show-confirm-dialog', 
+        `您选择了 ${selectedCount.value} 个文件，其中包含需要确认的项目。\n\n继续删除吗？`
+      )
+      if (!confirmed) return
+    } catch (error) {
+      console.error('[Renderer] Confirm dialog error:', error)
+    }
   }
   
   await startDelete()
@@ -684,47 +866,35 @@ const startDelete = async () => {
   deleteProgress.value = 0
   currentDeletingFile.value = ''
   deleteComplete.value = false
+  errorMessage.value = ''
   
   const filesToDelete = []
   Object.values(categorizedResults.value).forEach(category => {
-    category.files.forEach(file => {
+    category.files?.forEach(file => {
       if (selectedFiles.value.has(file.path)) {
         filesToDelete.push(file)
       }
     })
   })
   
-  let result
+  console.log('[Renderer] Deleting', filesToDelete.length, 'files')
   
-  if (electronAvailable.value) {
-    result = await ipcRenderer.invoke('delete-files', filesToDelete, false)
-  } else {
-    result = await mockDelete(filesToDelete)
-  }
-  
-  deleteProgress.value = 100
-  isDeleting.value = false
-  deleteComplete.value = true
-  
-  if (result.success) {
-    deleteResult.value = result.data
-  }
-}
-
-const mockDelete = async (files) => {
-  for (let i = 0; i < files.length; i++) {
-    deleteProgress.value = Math.round(((i + 1) / files.length) * 100)
-    currentDeletingFile.value = files[i].name
-    await new Promise(resolve => setTimeout(resolve, 200))
-  }
-  
-  return {
-    success: true,
-    data: {
-      success: files,
-      failed: [],
-      totalDeleted: files.reduce((sum, f) => sum + (f.size || 0), 0)
+  try {
+    const result = await invokeWithTimeout('delete-files', filesToDelete, false)
+    
+    deleteProgress.value = 100
+    isDeleting.value = false
+    deleteComplete.value = true
+    
+    if (result.success) {
+      deleteResult.value = result.data
+    } else {
+      showError('删除失败: ' + (result.error || '未知错误'))
     }
+  } catch (error) {
+    isDeleting.value = false
+    console.error('[Renderer] Delete error:', error)
+    showError('删除过程中出错: ' + error.message)
   }
 }
 
@@ -736,64 +906,20 @@ const analyzeWithAI = async (file) => {
   aiAnalysisFile.value = file
   aiAnalysisResult.value = null
   
-  let result
-  
-  if (electronAvailable.value) {
-    result = await ipcRenderer.invoke('search-file-safety', file.name, file.path)
-  } else {
-    result = await mockAIAnalysis(file)
-  }
-  
-  if (result.success) {
-    aiAnalysisResult.value = result.data
-    file.aiAnalyzed = true
-  }
-  
-  isAnalyzingAI.value = null
-}
-
-const mockAIAnalysis = async (file) => {
-  await new Promise(resolve => setTimeout(resolve, 1500))
-  
-  const ext = file.extension.toLowerCase()
-  
-  if (['.tmp', '.temp', '.log', '.bak'].includes(ext)) {
-    return {
-      success: true,
-      data: {
-        safeToDelete: true,
-        confidence: 95,
-        description: '这是一个临时文件或日志文件，由程序自动生成，通常在程序关闭后不再需要。',
-        impact: '删除该文件不会对系统或程序产生负面影响。程序会在需要时重新生成。',
-        sources: ['本地知识库', '网络搜索']
-      }
+  try {
+    const result = await invokeWithTimeout('search-file-safety', file.name, file.path)
+    
+    if (result.success) {
+      aiAnalysisResult.value = result.data
+      file.aiAnalyzed = true
+    } else {
+      showError('AI分析失败: ' + (result.error || '未知错误'))
     }
-  }
-  
-  if (['.exe', '.dll', '.sys'].includes(ext)) {
-    return {
-      success: true,
-      data: {
-        safeToDelete: false,
-        confidence: 99,
-        description: '这是一个可执行文件或系统库文件，是程序或系统的核心组成部分。',
-        impact: '删除该文件可能导致程序无法正常运行，甚至影响系统稳定性。',
-        warning: '该文件是系统或程序的重要文件，不建议删除！',
-        sources: ['本地知识库']
-      }
-    }
-  }
-  
-  return {
-    success: true,
-    data: {
-      safeToDelete: null,
-      confidence: 50,
-      description: '无法确定该文件的具体用途。',
-      impact: '不确定删除该文件的影响。建议谨慎操作。',
-      warning: '无法确认该文件是否可以安全删除，请谨慎操作。',
-      sources: ['本地知识库']
-    }
+  } catch (error) {
+    console.error('[Renderer] AI analysis error:', error)
+    showError('AI分析过程中出错: ' + error.message)
+  } finally {
+    isAnalyzingAI.value = null
   }
 }
 
@@ -813,11 +939,23 @@ const toggleSettings = () => {
 
 let deleteProgressListener = null
 
-onMounted(() => {
-  loadDrives()
+onMounted(async () => {
+  console.log('[Renderer] Component mounted')
+  console.log('[Renderer] electronAvailable:', electronAvailable.value)
+  
+  try {
+    console.log('[Renderer] Testing IPC connection...')
+    const pingResult = await invokeWithTimeout('ping')
+    console.log('[Renderer] Ping result:', pingResult)
+  } catch (error) {
+    console.log('[Renderer] Ping failed (expected in mock mode):', error.message)
+  }
+  
+  await loadDrives()
   
   if (electronAvailable.value) {
     deleteProgressListener = (event, data) => {
+      console.log('[Renderer] delete-progress event:', data)
       if (isDeleting.value) {
         deleteProgress.value = data.progress
         currentDeletingFile.value = data.currentFile || ''
@@ -867,6 +1005,59 @@ onUnmounted(() => {
   max-width: 1600px;
   margin: 0 auto;
   width: 100%;
+  position: relative;
+}
+
+.error-notification {
+  position: fixed;
+  top: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 9999;
+  background: var(--danger-color);
+  color: white;
+  padding: 12px 24px;
+  border-radius: var(--radius);
+  box-shadow: 0 4px 12px rgba(255, 77, 79, 0.3);
+  cursor: pointer;
+  animation: slideDown 0.3s ease;
+}
+
+@keyframes slideDown {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(-20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%) translateY(0);
+  }
+}
+
+.error-content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.error-content svg {
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+}
+
+.error-close {
+  background: none;
+  border: none;
+  color: white;
+  font-size: 20px;
+  cursor: pointer;
+  padding: 0 8px;
+  opacity: 0.7;
+}
+
+.error-close:hover {
+  opacity: 1;
 }
 
 .drive-grid {
